@@ -13,6 +13,7 @@ import { createHmac, randomUUID } from "node:crypto";
 
 const RUNNER_URL = process.env.AGENT_RUNNER_URL ?? "http://localhost:3939";
 const RUNNER_SECRET = process.env.RUNNER_SECRET ?? "";
+const DISPATCH_TIMEOUT_MS = parseInt(process.env.AGENT_DISPATCH_TIMEOUT_MS ?? "10000", 10);
 
 interface DispatchParams {
   agentId: string;
@@ -22,8 +23,8 @@ interface DispatchParams {
   taskType?: string;
 }
 
-function buildSignature(timestamp: string, body: string): string {
-  return createHmac("sha256", RUNNER_SECRET).update(`${timestamp}.${body}`).digest("hex");
+function buildSignature(timestamp: string, eventId: string, body: string): string {
+  return createHmac("sha256", RUNNER_SECRET).update(`${timestamp}.${eventId}.${body}`).digest("hex");
 }
 
 export async function dispatchToAgent(
@@ -42,15 +43,20 @@ export async function dispatchToAgent(
   };
   const body = JSON.stringify(payload);
   const timestamp = String(Date.now());
-  const signature = buildSignature(timestamp, body);
+  const eventId = randomUUID();
+  const signature = buildSignature(timestamp, eventId, body);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISPATCH_TIMEOUT_MS);
 
   try {
     const res = await fetch(`${RUNNER_URL}/webhook`, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         "X-BIK-Timestamp": timestamp,
-        "X-BIK-Event-Id": randomUUID(),
+        "X-BIK-Event-Id": eventId,
         "X-BIK-Signature": `sha256=${signature}`,
       },
       body,
@@ -67,6 +73,8 @@ export async function dispatchToAgent(
     }
   } catch (err) {
     return { accepted: false, error: `Runner not reachable: ${err}` };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

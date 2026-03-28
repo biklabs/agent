@@ -43,6 +43,7 @@ const RUNNER_ADMIN_TOKEN = process.env.RUNNER_ADMIN_TOKEN ?? RUNNER_SECRET;
 const REQUIRE_RUNNER_SECRET = (process.env.REQUIRE_RUNNER_SECRET ?? "true") !== "false";
 
 const WEBHOOK_MAX_SKEW_MS = parseInt(process.env.WEBHOOK_MAX_SKEW_MS ?? "300000", 10); // 5m
+const MAX_WEBHOOK_BODY_BYTES = parseInt(process.env.MAX_WEBHOOK_BODY_BYTES ?? "65536", 10); // 64 KiB
 const RUN_TIMEOUT_MS = parseInt(process.env.RUN_TIMEOUT_MS ?? "1800000", 10); // 30m
 const RUNNER_SKIP_PERMISSIONS = process.env.RUNNER_SKIP_PERMISSIONS === "true";
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
@@ -281,7 +282,7 @@ function isSessionAuthorized(req: Request): boolean {
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const direct = req.headers.get("x-runner-secret") ?? "";
   const provided = bearer || direct;
-  return provided === RUNNER_SECRET;
+  return constantTimeTextEqual(RUNNER_SECRET, provided);
 }
 
 function cleanupExpiredSessions(): void {
@@ -369,6 +370,27 @@ function sanitizeId(value: string, label: string): string {
   return value;
 }
 
+function sanitizeEventId(value: string): string {
+  if (!/^[a-zA-Z0-9._:-]{8,128}$/.test(value)) {
+    throw new Error("invalid eventId: only [a-zA-Z0-9._:-], min 8, max 128 chars");
+  }
+  return value;
+}
+
+function sanitizeOptionalShortText(
+  value: string | null | undefined,
+  label: string,
+  maxLength = 256,
+): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.length > maxLength) {
+    throw new Error(`invalid ${label}: max length ${maxLength}`);
+  }
+  return trimmed;
+}
+
 function hmacHex(input: string): string {
   return createHmac("sha256", RUNNER_SECRET).update(input).digest("hex");
 }
@@ -386,6 +408,14 @@ function constantTimeHexEqual(expectedHex: string, gotHex: string): boolean {
   return timingSafeEqual(expected, got);
 }
 
+function constantTimeTextEqual(expected: string, got: string): boolean {
+  if (!expected || !got) return false;
+  const expectedBuf = Buffer.from(expected, "utf8");
+  const gotBuf = Buffer.from(got, "utf8");
+  if (expectedBuf.length !== gotBuf.length) return false;
+  return timingSafeEqual(expectedBuf, gotBuf);
+}
+
 function validateWebhookSignature(req: Request, rawBody: string): { ok: true } | { ok: false; reason: string } {
   if (!RUNNER_SECRET) {
     return { ok: false, reason: "runner secret not configured" };
@@ -397,6 +427,12 @@ function validateWebhookSignature(req: Request, rawBody: string): { ok: true } |
 
   if (!signatureHeader || !timestampHeader || !eventId) {
     return { ok: false, reason: "missing signature headers" };
+  }
+
+  try {
+    sanitizeEventId(eventId);
+  } catch {
+    return { ok: false, reason: "invalid event id" };
   }
 
   const timestamp = Number(timestampHeader);
@@ -420,7 +456,7 @@ function validateWebhookSignature(req: Request, rawBody: string): { ok: true } |
     ? signatureHeader.slice("sha256=".length)
     : signatureHeader;
 
-  const expected = hmacHex(`${timestampHeader}.${rawBody}`);
+  const expected = hmacHex(`${timestampHeader}.${eventId}.${rawBody}`);
   if (!constantTimeHexEqual(expected, received)) {
     return { ok: false, reason: "bad signature" };
   }
@@ -441,7 +477,7 @@ function isAdminAuthorized(req: Request): boolean {
   const direct = req.headers.get("x-runner-secret") ?? "";
   const provided = bearer || direct;
 
-  return provided === RUNNER_ADMIN_TOKEN;
+  return constantTimeTextEqual(RUNNER_ADMIN_TOKEN, provided);
 }
 
 function safeJsonResponse(payload: unknown, init?: ResponseInit): Response {
@@ -492,6 +528,9 @@ function enqueueJob(payload: WebhookPayload, eventId: string):
   const safeAgentId = sanitizeId(payload.agentId, "agentId");
   const safeTaskId = sanitizeId(payload.taskId, "taskId");
   const safeProjectId = sanitizeId(payload.projectId, "projectId");
+  const safeTaskTitle = sanitizeOptionalShortText(payload.taskTitle, "taskTitle");
+  const safeTaskType = sanitizeOptionalShortText(payload.taskType, "taskType", 128);
+  sanitizeEventId(eventId);
 
   const queueDepth = queueDepthByAgent(safeAgentId);
   if (queueDepth >= MAX_QUEUE_DEPTH_PER_AGENT) {
@@ -511,6 +550,28 @@ function enqueueJob(payload: WebhookPayload, eventId: string):
       ? "waiting_session"
       : "queued";
 
+  const activeSameTask = db
+    .query(
+      `
+      SELECT id
+      FROM agent_jobs
+      WHERE run_key = ?
+        AND status IN ('queued','waiting_session','leased','running')
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    )
+    .get(runKey) as { id: string } | null;
+
+  if (activeSameTask) {
+    return {
+      ok: true,
+      duplicate: true,
+      jobId: activeSameTask.id,
+      queueDepth,
+    };
+  }
+
   try {
     db.query(
       `
@@ -528,8 +589,8 @@ function enqueueJob(payload: WebhookPayload, eventId: string):
       safeAgentId,
       safeTaskId,
       safeProjectId,
-      payload.taskTitle ?? null,
-      payload.taskType ?? null,
+      safeTaskTitle,
+      safeTaskType,
       JSON.stringify(payload),
       initialStatus,
       MAX_ATTEMPTS_DEFAULT,
@@ -654,33 +715,37 @@ function claimNextJobForAgentSession(agentId: string): JobRow | null {
   return getJobById(candidate.id);
 }
 
-function markJobRunning(jobId: string): void {
-  db.query(
+function markJobRunning(jobId: string): boolean {
+  const result = db.query(
     `
     UPDATE agent_jobs
     SET status='running',
         lease_until=?,
         last_error=NULL,
         updated_at=?
-    WHERE id=?
+    WHERE id=? AND status='leased'
   `,
-  ).run(nowMs() + LEASE_MS, nowIso(), jobId);
+  ).run(nowMs() + LEASE_MS, nowIso(), jobId) as { changes?: number };
+  if ((result.changes ?? 0) !== 1) return false;
   logJobEvent(jobId, "job.running");
+  return true;
 }
 
-function markJobCompleted(jobId: string): void {
-  db.query(
+function markJobCompleted(jobId: string): boolean {
+  const result = db.query(
     `
     UPDATE agent_jobs
     SET status='completed', lease_until=NULL, updated_at=?
-    WHERE id=?
+    WHERE id=? AND status IN ('running','leased')
   `,
-  ).run(nowIso(), jobId);
+  ).run(nowIso(), jobId) as { changes?: number };
+  if ((result.changes ?? 0) !== 1) return false;
   logJobEvent(jobId, "job.completed");
+  return true;
 }
 
-function markJobCancelled(jobId: string, reason: string): void {
-  db.query(
+function markJobCancelled(jobId: string, reason: string): boolean {
+  const result = db.query(
     `
     UPDATE agent_jobs
     SET status='cancelled',
@@ -688,9 +753,12 @@ function markJobCancelled(jobId: string, reason: string): void {
         last_error=?,
         updated_at=?
     WHERE id=?
+      AND status NOT IN ('completed','dead_letter','cancelled')
   `,
-  ).run(reason, nowIso(), jobId);
+  ).run(reason, nowIso(), jobId) as { changes?: number };
+  if ((result.changes ?? 0) !== 1) return false;
   logJobEvent(jobId, "job.cancelled", { reason });
+  return true;
 }
 
 function markJobDeadLetter(jobId: string, reason: string): void {
@@ -770,7 +838,10 @@ function cancelJobNow(jobId: string): { ok: true } | { ok: false; status: number
     }
   }
 
-  markJobCancelled(jobId, "cancelled_by_admin");
+  const cancelled = markJobCancelled(jobId, "cancelled_by_admin");
+  if (!cancelled) {
+    return { ok: false, status: 409, error: "cancel transition failed" };
+  }
   return { ok: true };
 }
 
@@ -1171,7 +1242,9 @@ function processQueueTick(): void {
 
       try {
         spawnAgent(agent, payload, job.id);
-        markJobRunning(job.id);
+        if (!markJobRunning(job.id)) {
+          markJobFailedWithRetry(job.id, "state transition failed: leased->running");
+        }
       } catch (err) {
         if (err instanceof PermanentJobError) {
           markJobDeadLetter(job.id, err.message);
@@ -1503,6 +1576,13 @@ const server = Bun.serve({
         return safeJsonResponse({ error: "invalid json" }, { status: 400 });
       }
 
+      try {
+        sanitizeId(body.sessionId, "sessionId");
+        sanitizeId(body.agentId, "agentId");
+      } catch (err) {
+        return safeJsonResponse({ error: String(err) }, { status: 400 });
+      }
+
       const jobId = sessionStartMatch[1] ?? "";
       const job = getJobById(jobId);
       if (!job) return safeJsonResponse({ error: "job not found" }, { status: 404 });
@@ -1513,7 +1593,9 @@ const server = Bun.serve({
         return safeJsonResponse({ error: `job not leased (status=${job.status})` }, { status: 409 });
       }
 
-      markJobRunning(jobId);
+      if (!markJobRunning(jobId)) {
+        return safeJsonResponse({ error: "state transition failed: leased->running" }, { status: 409 });
+      }
       logJobEvent(jobId, "runtime.started_terminal", {
         sessionId: body.sessionId,
         agentId: body.agentId,
@@ -1543,6 +1625,13 @@ const server = Bun.serve({
         return safeJsonResponse({ error: "invalid json" }, { status: 400 });
       }
 
+      try {
+        sanitizeId(body.sessionId, "sessionId");
+        sanitizeId(body.agentId, "agentId");
+      } catch (err) {
+        return safeJsonResponse({ error: String(err) }, { status: 400 });
+      }
+
       const jobId = sessionCompleteMatch[1] ?? "";
       const job = getJobById(jobId);
       if (!job) return safeJsonResponse({ error: "job not found" }, { status: 404 });
@@ -1555,7 +1644,9 @@ const server = Bun.serve({
 
       const ok = (body.exitCode ?? 1) === 0 && !body.error && !body.timedOut;
       if (ok) {
-        markJobCompleted(jobId);
+        if (!markJobCompleted(jobId)) {
+          return safeJsonResponse({ error: "state transition failed: active->completed" }, { status: 409 });
+        }
       } else {
         markJobFailedWithRetry(jobId, body.error ?? `exit_code=${String(body.exitCode ?? "unknown")}`, !!body.timedOut);
       }
@@ -1571,7 +1662,18 @@ const server = Bun.serve({
     }
 
     if (url.pathname === "/webhook" && req.method === "POST") {
+      const contentLengthHeader = req.headers.get("content-length");
+      if (contentLengthHeader) {
+        const contentLength = Number(contentLengthHeader);
+        if (Number.isFinite(contentLength) && contentLength > MAX_WEBHOOK_BODY_BYTES) {
+          return safeJsonResponse({ error: "payload too large" }, { status: 413 });
+        }
+      }
+
       const rawBody = await req.text();
+      if (Buffer.byteLength(rawBody, "utf8") > MAX_WEBHOOK_BODY_BYTES) {
+        return safeJsonResponse({ error: "payload too large" }, { status: 413 });
+      }
 
       let payload: WebhookPayload;
       try {
@@ -1596,6 +1698,7 @@ const server = Bun.serve({
       }
 
       try {
+        sanitizeEventId(eventId);
         sanitizeId(payload.agentId, "agentId");
         sanitizeId(payload.taskId, "taskId");
         sanitizeId(payload.projectId, "projectId");

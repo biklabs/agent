@@ -29,6 +29,7 @@
     "session-client.ts",
     "agents.json",
     "README.md",
+    "QUALITY_GATES.md",
     "RUNTIME_PROFILES.md",
     "SECURITY.md",
     "CONTRIBUTING.md",

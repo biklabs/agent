@@ -49,6 +49,8 @@ export TEST_AGENT_MCP_TOKEN="mcp_te_xxxxxxxxxxxx"
 export DEPLOY_AGENT_MCP_TOKEN="mcp_de_xxxxxxxxxxxx"
 export RUNNER_SECRET="shared-secret-between-pm-and-runner"
 export RUNNER_ADMIN_TOKEN="admin-token-for-runs-and-agents-endpoints" # opcional, default=RUNNER_SECRET
+export WEBHOOK_MAX_SKEW_MS="300000" # opcional (5m)
+export MAX_WEBHOOK_BODY_BYTES="65536" # opcional (64 KiB)
 export RUN_TIMEOUT_MS="1800000" # opcional (30m)
 export RUNNER_SKIP_PERMISSIONS="false" # en prod debe ser false
 export RUNNER_DB_PATH="/tmp/biklabs-agent-runs/runner.db" # opcional
@@ -81,8 +83,8 @@ bun run scripts/agent-runner/dispatch.ts writer-agent AIFW-18 019d320f-xxxx
 // src/lib/agent-dispatch.ts
 import { createHmac, randomUUID } from "node:crypto";
 
-function sign(secret: string, timestamp: string, body: string): string {
-  return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+function sign(secret: string, timestamp: string, eventId: string, body: string): string {
+  return createHmac("sha256", secret).update(`${timestamp}.${eventId}.${body}`).digest("hex");
 }
 
 export async function dispatchToAgent(params: {
@@ -95,14 +97,15 @@ export async function dispatchToAgent(params: {
     ...params,
   });
   const timestamp = String(Date.now());
-  const signature = sign(process.env.RUNNER_SECRET!, timestamp, payload);
+  const eventId = randomUUID();
+  const signature = sign(process.env.RUNNER_SECRET!, timestamp, eventId, payload);
 
   return fetch("http://localhost:3939/webhook", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "X-BIK-Timestamp": timestamp,
-      "X-BIK-Event-Id": randomUUID(),
+      "X-BIK-Event-Id": eventId,
       "X-BIK-Signature": `sha256=${signature}`,
     },
     body: payload,
@@ -140,10 +143,10 @@ if (isAgentAssignee(newAssignee)) {
 
 ### `/jobs` query params
 
-- `status`: `queued|leased|running|completed|failed|timed_out|cancelled|dead_letter`
 - `status`: `queued|waiting_session|leased|running|completed|failed|timed_out|cancelled|dead_letter`
 - `agentId`: filtra por agente
 - `limit`: 1-500 (default 100)
+- Nota: el runner evita ejecución duplicada activa por `run_key` (`agentId:taskId`).
 
 ## Archivos
 
@@ -153,6 +156,7 @@ scripts/agent-runner/
   dispatch.ts    — Cliente para disparar agentes (CLI + importable)
   jobs.ts        — CLI admin (list/cancel/retry de jobs)
   agents.json    — Registro de agentes (incluye `runtimeType`)
+  QUALITY_GATES.md — checklist de release (seguridad/fiabilidad/SLO)
   README.md      — Este archivo
 ```
 

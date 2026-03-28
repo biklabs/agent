@@ -26,12 +26,25 @@ const HOST = process.env.AGENT_SESSION_HOST ?? process.env.HOSTNAME ?? "local-te
 
 const CLAIM_INTERVAL_MS = parseInt(process.env.AGENT_CLAIM_INTERVAL_MS ?? "2000", 10);
 const HEARTBEAT_INTERVAL_MS = parseInt(process.env.AGENT_HEARTBEAT_INTERVAL_MS ?? "10000", 10);
+const HTTP_TIMEOUT_MS = parseInt(process.env.AGENT_HTTP_TIMEOUT_MS ?? "15000", 10);
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
 
 if (!RUNNER_SECRET) throw new Error("RUNNER_SECRET is required");
 if (!AGENT_ID) throw new Error("AGENT_ID is required");
 if (!AGENT_MCP_TOKEN) throw new Error("AGENT_MCP_TOKEN is required");
+if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(AGENT_ID)) {
+  throw new Error("AGENT_ID has invalid format (allowed: [a-zA-Z0-9._:-], max 128 chars)");
+}
+if (!Number.isFinite(CLAIM_INTERVAL_MS) || CLAIM_INTERVAL_MS < 250) {
+  throw new Error("AGENT_CLAIM_INTERVAL_MS must be >= 250");
+}
+if (!Number.isFinite(HEARTBEAT_INTERVAL_MS) || HEARTBEAT_INTERVAL_MS < 1000) {
+  throw new Error("AGENT_HEARTBEAT_INTERVAL_MS must be >= 1000");
+}
+if (!Number.isFinite(HTTP_TIMEOUT_MS) || HTTP_TIMEOUT_MS < 1000) {
+  throw new Error("AGENT_HTTP_TIMEOUT_MS must be >= 1000");
+}
 
 interface ClaimedJob {
   id: string;
@@ -56,21 +69,27 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function runnerPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${RUNNER_URL}${path}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${RUNNER_SECRET}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${RUNNER_URL}${path}`, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${RUNNER_SECRET}`,
+      },
+      body: JSON.stringify(body),
+    });
 
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`runner ${path} failed (${res.status}): ${text}`);
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`runner ${path} failed (${res.status}): ${text}`);
+    }
+    return JSON.parse(text) as T;
+  } finally {
+    clearTimeout(timer);
   }
-
-  return JSON.parse(text) as T;
 }
 
 function writeRuntimeFiles(workdir: string, agent: AgentInfo): void {
