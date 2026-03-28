@@ -1,3 +1,71 @@
+# BIKLabs Agent Runner — Terminal-First Agent Orchestrator
+
+EN first, ES below.
+
+## English (quick start)
+
+BIKLabs Agent Runner is a terminal-first control plane for AI agents working from PM assignments.
+
+Core capabilities:
+- Signed webhook ingestion (`HMAC`: timestamp + eventId + body)
+- Durable job queue with retries and dead-letter
+- Two execution modes:
+  - `spawn`: runner executes runtime directly
+  - `terminal`: live agent terminal claims and executes jobs
+- Runtime adapter model (`claude_code`, `codex`, generic adapter for others)
+- Operational endpoints and job/event audit trail
+
+### Quick Start
+
+1. Set agent MCP tokens and runner secrets:
+
+```bash
+export WRITER_AGENT_MCP_TOKEN="mcp_wr_xxxxxxxxxxxx"
+export TEST_AGENT_MCP_TOKEN="mcp_te_xxxxxxxxxxxx"
+export DEPLOY_AGENT_MCP_TOKEN="mcp_de_xxxxxxxxxxxx"
+export RUNNER_SECRET="shared-secret-between-pm-and-runner"
+export RUNNER_ADMIN_TOKEN="admin-token-for-admin-endpoints"
+```
+
+2. Start runner:
+
+```bash
+bun run scripts/agent-runner/runner.ts
+```
+
+3. Dispatch a test assignment:
+
+```bash
+bun run scripts/agent-runner/dispatch.ts writer-agent TASK-123 proj-abc
+```
+
+4. Inspect queue and events:
+
+```bash
+RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts stats
+RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts list
+RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts events <job-id> 200
+```
+
+5. Terminal-first mode (BYO live terminal):
+
+```bash
+export RUNNER_EXECUTION_MODE="terminal"
+bun run scripts/agent-runner/runner.ts
+
+# in another terminal, one per agent
+AGENT_ID=writer-agent AGENT_MCP_TOKEN=$WRITER_AGENT_MCP_TOKEN RUNNER_SECRET=$RUNNER_SECRET \
+  bun run scripts/agent-runner/session-client.ts
+```
+
+### Official repository
+
+- https://github.com/biklabs/agent-runner
+
+---
+
+## Español
+
 # BIKLabs Agent Runner — MCP Bidireccional + Durable Queue (Fase 1/2)
 
 Cada agente usa su propio token MCP.
