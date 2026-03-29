@@ -1,10 +1,10 @@
-# Runtime Profiles — Claude Code / Codex / OpenCode / Kiro
+# Runtime Profiles — Claude Code / Codex / Cursor / OpenCode / Kiro / OpenClaw
 
 Este runner soporta:
 
 - `claude_code` (hardcoded)
 - `codex` (hardcoded)
-- `opencode|kiro|chat` via generic CLI adapter (`runtimeCommand`, `runtimeArgs`, `runtimePromptMode`)
+- `cursor|opencode|kiro|openclaw|chat` via generic CLI adapter (`runtimeCommand`, `runtimeArgs`, `runtimePromptMode`)
 
 ## Importante
 
@@ -59,7 +59,32 @@ Variables opcionales:
 
 ---
 
-## 3) OpenCode (generic adapter)
+## 3) Cursor (generic adapter preset)
+
+```json
+{
+  "id": "cursor-agent",
+  "name": "CursorAgent",
+  "runtimeType": "cursor",
+  "runtimeCommand": "cursor-agent",
+  "runtimeArgs": ["run", "--cwd", "{WORKDIR}", "--mcp-config", "{MCP_CONFIG}", "{PROMPT}"],
+  "runtimePromptMode": "arg",
+  "runtimeEnv": {
+    "BIK_MODE": "agent"
+  },
+  "mcpToken": "${CURSOR_AGENT_MCP_TOKEN}",
+  "role": "Software engineer",
+  "systemPrompt": "You are CursorAgent...",
+  "permissions": ["read_data", "update_entity"],
+  "maxTokensBudget": 100000
+}
+```
+
+Nota: `cursor-agent` es el valor por defecto. Se puede sobrescribir con `CURSOR_BIN`.
+
+---
+
+## 4) OpenCode (generic adapter)
 
 ```json
 {
@@ -88,7 +113,7 @@ Si el CLI necesita prompt por stdin:
 
 ---
 
-## 4) Kiro (generic adapter)
+## 5) Kiro (generic adapter)
 
 ```json
 {
@@ -113,7 +138,30 @@ Nota: el ejemplo de args/env es plantilla. Ajustar a flags reales de la versión
 
 ---
 
-## 5) Chat runtime (Telegram/WhatsApp bridge)
+## 6) OpenClaw (generic adapter)
+
+```json
+{
+  "id": "openclaw-agent",
+  "name": "OpenClawAgent",
+  "runtimeType": "openclaw",
+  "runtimeCommand": "openclaw",
+  "runtimeArgs": ["run", "--cwd", "{WORKDIR}", "--mcp-config", "{MCP_CONFIG}"],
+  "runtimePromptMode": "stdin",
+  "runtimeEnv": {
+    "OPENCLAW_MODE": "agent"
+  },
+  "mcpToken": "${OPENCLAW_AGENT_MCP_TOKEN}",
+  "role": "Generalista",
+  "systemPrompt": "Eres OpenClawAgent...",
+  "permissions": ["read_data", "update_entity"],
+  "maxTokensBudget": 80000
+}
+```
+
+---
+
+## 7) Chat runtime (Telegram/WhatsApp bridge)
 
 ```json
 {

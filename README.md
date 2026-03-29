@@ -1,375 +1,297 @@
-# BIKLabs Agent Runner — Terminal-First Agent Orchestrator
+# BIKLabs Agent Runner
 
-EN first, ES below.
+Terminal-first agent orchestration for PM work items, with MCP identity per agent.
 
-## English (quick start)
-
-BIKLabs Agent Runner is a terminal-first control plane for AI agents working from PM assignments.
-
-Core capabilities:
-- Signed webhook ingestion (`HMAC`: timestamp + eventId + body)
-- Durable job queue with retries and dead-letter
-- Two execution modes:
-  - `spawn`: runner executes runtime directly
-  - `terminal`: live agent terminal claims and executes jobs
-- Runtime adapter model (`claude_code`, `codex`, generic adapter for others)
-- Operational endpoints and job/event audit trail
-
-### Quick Start
-
-1. Set agent MCP tokens and runner secrets:
-
-```bash
-export WRITER_AGENT_MCP_TOKEN="mcp_wr_xxxxxxxxxxxx"
-export TEST_AGENT_MCP_TOKEN="mcp_te_xxxxxxxxxxxx"
-export DEPLOY_AGENT_MCP_TOKEN="mcp_de_xxxxxxxxxxxx"
-export RUNNER_SECRET="shared-secret-between-pm-and-runner"
-export RUNNER_ADMIN_TOKEN="admin-token-for-admin-endpoints"
-```
-
-2. Start runner:
-
-```bash
-bun run scripts/agent-runner/runner.ts
-```
-
-3. Dispatch a test assignment:
-
-```bash
-bun run scripts/agent-runner/dispatch.ts writer-agent TASK-123 proj-abc
-```
-
-4. Inspect queue and events:
-
-```bash
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts stats
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts list
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts events <job-id> 200
-```
-
-5. Terminal-first mode (BYO live terminal):
-
-```bash
-export RUNNER_EXECUTION_MODE="terminal"
-bun run scripts/agent-runner/runner.ts
-
-# in another terminal, one per agent
-AGENT_ID=writer-agent AGENT_MCP_TOKEN=$WRITER_AGENT_MCP_TOKEN RUNNER_SECRET=$RUNNER_SECRET \
-  bun run scripts/agent-runner/session-client.ts
-```
-
-### Official repository
-
-- https://github.com/biklabs/agent-runner
+Official repo: [github.com/biklabs/agent-runner](https://github.com/biklabs/agent-runner)
 
 ---
 
-## Español
+## Why this exists
 
-# BIKLabs Agent Runner — MCP Bidireccional + Durable Queue (Fase 1/2)
+BIKLabs Agent Runner connects PM task assignment with real execution in developer terminals.
 
-Cada agente usa su propio token MCP.
-Modos:
+When a work item is assigned to an agent:
+1. The PM emits an assignment event.
+2. The runner (or listener mode) picks it up.
+3. The configured runtime (`claude`, `codex`, `cursor`, `opencode`, `kiro`, `openclaw`, etc.) executes the task.
+4. Execution is visible, auditable, and tied to the agent MCP token.
 
-- `spawn` (default): runner spawnea runtime directamente.
-- `terminal` (BYO): terminales vivas reclaman jobs (`session-client`) y ejecutan en su propio TTY.
+The PM remains the source of truth for assignment and lifecycle.
 
-## Arquitectura
+---
 
-```
-PM asigna a @WriterAgent
-  │
-  ▼ POST /webhook
-Runner (localhost:3939)
-  │
-  ▼ Enqueue job durable (SQLite)
-Worker loop (lease + retry + DLQ)
-  │
-  ▼ spawna Claude Code con --mcp-config
-Claude Code (WriterAgent runtime)
-  │
-  ▼ MCP con token mcp_wr_*
-PM Backend (devapi.biklabs.ai/mcp/sse)
-  │
-  ▼ PM sabe que es WriterAgent por el token
-Ejecuta tarea → actualiza estado → cierra
-```
+## Core capabilities
 
-## Setup
+- Terminal-first execution (human-visible TTY)
+- MCP-first identity model (one token per agent)
+- Signed webhooks (HMAC)
+- Durable job queue with retry/backoff and dead-letter (runner mode)
+- Session lifecycle for terminal agents (`heartbeat`, `claim`, `start`, `complete`, `cancel`)
+- Multi-runtime support:
+  - Hardcoded adapters: `claude_code`, `codex`
+  - Generic adapter presets: `cursor`, `opencode`, `kiro`, `openclaw`, `chat`, and other CLIs
 
-### 1. Generar tokens MCP por agente (backend)
+---
 
-Cada agente necesita su propio token MCP en el backend.
-El token determina la identidad y permisos del agente.
+## Execution modes
 
-```bash
-# En el backend, crear tokens:
-# POST /v1/mcp/tokens { agentId: "writer-agent", permissions: ["read", "write", "docs"] }
-# POST /v1/mcp/tokens { agentId: "test-agent", permissions: ["read", "write"] }
-# POST /v1/mcp/tokens { agentId: "deploy-agent", permissions: ["read"] }
-```
+### 1) `listen` (recommended)
+Direct terminal listener over MCP (`SSE + polling fallback`).
 
-### 2. Configurar env vars
+- Best for BYO runtime and “I want to see what my agent is doing”.
+- Minimal local infrastructure.
 
-```bash
-export WRITER_AGENT_MCP_TOKEN="mcp_wr_xxxxxxxxxxxx"
-export TEST_AGENT_MCP_TOKEN="mcp_te_xxxxxxxxxxxx"
-export DEPLOY_AGENT_MCP_TOKEN="mcp_de_xxxxxxxxxxxx"
-export RUNNER_SECRET="shared-secret-between-pm-and-runner"
-export RUNNER_ADMIN_TOKEN="admin-token-for-runs-and-agents-endpoints" # opcional, default=RUNNER_SECRET
-export WEBHOOK_MAX_SKEW_MS="300000" # opcional (5m)
-export MAX_WEBHOOK_BODY_BYTES="65536" # opcional (64 KiB)
-export RUN_TIMEOUT_MS="1800000" # opcional (30m)
-export RUNNER_SKIP_PERMISSIONS="false" # en prod debe ser false
-export RUNNER_DB_PATH="/tmp/biklabs-agent-runs/runner.db" # opcional
-export QUEUE_POLL_INTERVAL_MS="1000" # opcional
-export LEASE_MS="90000" # opcional
-export MAX_ATTEMPTS_DEFAULT="3" # opcional
-export MAX_QUEUE_DEPTH_PER_AGENT="20" # opcional
-export RUNNER_EXECUTION_MODE="spawn" # spawn|terminal
-export SESSION_TTL_MS="30000" # solo terminal mode
-```
+### 2) `spawn` (runner default)
+Runner receives webhooks and spawns runtimes directly.
 
-### 3. Arrancar el runner
+- Useful for centralized infra or controlled environments.
+
+### 3) `terminal` (runner + session clients)
+Runner manages durable queue; local terminal sessions claim and execute jobs.
+
+- Best when you want both queue guarantees and live terminal visibility.
+
+---
+
+## Quick start
+
+If you cloned `biklabs/agent-runner`, run commands from that repo root.
+If you are in the monorepo, prepend `scripts/agent-runner/` to file paths.
+
+## A. Listener-only flow (recommended)
 
 ```bash
-bun run scripts/agent-runner/runner.ts
+# 1) local setup wizard
+bun run bik-agent.ts init
+
+# 2) validate setup
+bun run bik-agent.ts doctor
+
+# 3) start listening from terminal
+bun run bik-agent.ts listen
+
+# 4) optional: quick status
+bun run bik-agent.ts status
+
+# 5) print canonical runtime presets (JSON)
+bun run bik-agent.ts presets
+
+# 6) run compatibility smoke matrix
+bun run bik-agent.ts matrix
 ```
 
-### 4. Probar dispatch manual
+Required env for listener:
 
 ```bash
-# Dispatch WriterAgent para tarea AIFW-18
-bun run scripts/agent-runner/dispatch.ts writer-agent AIFW-18 019d320f-xxxx
+export BIK_AGENT_ID="writer-agent"
+export BIK_AGENT_TOKEN="mcp_wr_..."
+export BIK_MCP_URL="https://devapi.biklabs.ai/v1/mcp"
+export BIK_RUNTIME_TYPE="claude_code"   # claude_code|codex|cursor|opencode|kiro|openclaw|chat
+export BIK_LISTEN_MODE="auto"           # auto|sse|poll
+export BIK_WORK_DIR="$PWD"
 ```
 
-`dispatch.ts` firma el webhook automáticamente con HMAC (headers `X-BIK-*`).
-
-### 5. Integrar en el PM
-
-```typescript
-// src/lib/agent-dispatch.ts
-import { createHmac, randomUUID } from "node:crypto";
-
-function sign(secret: string, timestamp: string, eventId: string, body: string): string {
-  return createHmac("sha256", secret).update(`${timestamp}.${eventId}.${body}`).digest("hex");
-}
-
-export async function dispatchToAgent(params: {
-  agentId: string;
-  taskId: string;
-  projectId: string;
-}) {
-  const payload = JSON.stringify({
-    event: "task.assigned_to_agent",
-    ...params,
-  });
-  const timestamp = String(Date.now());
-  const eventId = randomUUID();
-  const signature = sign(process.env.RUNNER_SECRET!, timestamp, eventId, payload);
-
-  return fetch("http://localhost:3939/webhook", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-BIK-Timestamp": timestamp,
-      "X-BIK-Event-Id": eventId,
-      "X-BIK-Signature": `sha256=${signature}`,
-    },
-    body: payload,
-  });
-}
-
-// En el handler de asignacion:
-if (isAgentAssignee(newAssignee)) {
-  await dispatchToAgent({
-    agentId: agentIdFromMember(newAssignee),
-    taskId: workItem.id,
-    projectId: workItem.projectId,
-  });
-}
-```
-
-## Endpoints
-
-| Metodo | Path | Descripcion |
-|--------|------|-------------|
-| POST | /webhook | Dispatch agente (requiere firma HMAC en headers) |
-| GET | /jobs | Jobs durables (requiere `Authorization: Bearer <RUNNER_ADMIN_TOKEN>`) |
-| GET | /jobs/{id}/events | Historial de eventos del job (queued → leased → running → ...) |
-| POST | /jobs/{id}/cancel | Cancela un job queued/leased/running (admin) |
-| POST | /jobs/{id}/retry | Reencola un job failed/timed_out/dead_letter/cancelled (admin) |
-| GET | /stats | Agregados de cola/runs por estado (admin) |
-| GET | /runs | Runs activos (requiere `Authorization: Bearer <RUNNER_ADMIN_TOKEN>`) |
-| GET | /agents | Agentes registrados, sin tokens (requiere `Authorization: Bearer <RUNNER_ADMIN_TOKEN>`) |
-| GET | /sessions | Sesiones terminal activas (admin) |
-| GET | /health | Health check |
-| POST | /agent/session/heartbeat | Heartbeat de terminal agente (`Authorization: Bearer <RUNNER_SECRET>`) |
-| POST | /agent/session/claim | Claim de job para esa terminal/agente |
-| POST | /agent/session/jobs/{id}/start | Marca job en `running` desde terminal |
-| POST | /agent/session/jobs/{id}/complete | Finaliza job desde terminal (success/fail) |
-
-### `/jobs` query params
-
-- `status`: `queued|waiting_session|leased|running|completed|failed|timed_out|cancelled|dead_letter`
-- `agentId`: filtra por agente
-- `limit`: 1-500 (default 100)
-- Nota: el runner evita ejecución duplicada activa por `run_key` (`agentId:taskId`).
-
-## Archivos
-
-```
-scripts/agent-runner/
-  runner.ts      — Servidor webhook + cola durable + runtime adapters
-  dispatch.ts    — Cliente para disparar agentes (CLI + importable)
-  jobs.ts        — CLI admin (list/cancel/retry de jobs)
-  agents.json    — Registro de agentes (incluye `runtimeType`)
-  QUALITY_GATES.md — checklist de release (seguridad/fiabilidad/SLO)
-  README.md      — Este archivo
-```
-
-### CLI de operaciones de cola
+Optional control-plane env (recommended for robust lifecycle):
 
 ```bash
-# Listar jobs
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts list
-
-# Filtrar
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts list queued writer-agent
-
-# Stats
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts stats
-
-# Timeline de eventos de un job
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts events <job-id> 200
-
-# Cancelar / reintentar
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts cancel <job-id>
-RUNNER_ADMIN_TOKEN=... bun run scripts/agent-runner/jobs.ts retry <job-id>
+export AGENT_RUNNER_URL="http://localhost:3939"
+export RUNNER_SECRET="shared-secret"
+export BIK_HEARTBEAT_INTERVAL_MS="10000"
+export BIK_CLAIM_INTERVAL_MS="2000"
+export BIK_CONTROL_CANCEL_POLL_MS="1500"
 ```
 
-## Runtime adapters (Fase 2)
+## B. Runner flow (queue + admin endpoints)
 
-`agents.json` define `runtimeType` por agente:
+```bash
+export WRITER_AGENT_MCP_TOKEN="mcp_wr_xxx"
+export TEST_AGENT_MCP_TOKEN="mcp_te_xxx"
+export DEPLOY_AGENT_MCP_TOKEN="mcp_de_xxx"
+export RUNNER_SECRET="shared-secret"
+export RUNNER_ADMIN_TOKEN="admin-token"
 
-- `claude_code` (default)
+bun run runner.ts
+```
+
+Dispatch a test assignment:
+
+```bash
+bun run dispatch.ts writer-agent TASK-123 proj-abc
+```
+
+Inspect queue:
+
+```bash
+RUNNER_ADMIN_TOKEN=... bun run jobs.ts stats
+RUNNER_ADMIN_TOKEN=... bun run jobs.ts list
+RUNNER_ADMIN_TOKEN=... bun run jobs.ts events <job-id> 200
+```
+
+---
+
+## Runtime adapters
+
+`agents.json` supports per-agent runtime config.
+
+### Built-in adapters
+- `claude_code`
 - `codex`
-- `opencode` / `kiro` / `chat` vía **generic CLI adapter** (`runtimeCommand` + `runtimeArgs`)
 
-Ejemplo:
+### Generic adapter (all other CLIs)
+Use these fields per agent:
+- `runtimeCommand`
+- `runtimeArgs`
+- `runtimeEnv`
+- `runtimePromptMode` (`arg` or `stdin`)
 
-```json
-{
-  "id": "writer-agent",
-  "name": "WriterAgent",
-  "runtimeType": "codex",
-  "mcpToken": "${WRITER_AGENT_MCP_TOKEN}"
-}
-```
+Placeholders available:
+- `{PROMPT}`
+- `{WORKDIR}`
+- `{MCP_URL}`
+- `{MCP_CONFIG}`
+- `{CLAUDE_MD}`
 
-### Generic CLI adapter (para “todos los famosos”)
-
-Para runtimes sin integración hardcoded, define por agente:
-
-- `runtimeCommand`: binario a ejecutar
-- `runtimeArgs`: args con placeholders opcionales
-- `runtimeEnv`: env extra con placeholders
-- `runtimePromptMode`: `arg` o `stdin`
-
-Placeholders disponibles:
-
-- `{PROMPT}`: prompt final del job
-- `{WORKDIR}`: carpeta temporal del run
-- `{MCP_URL}`: URL del servidor MCP
-- `{MCP_CONFIG}`: ruta al `mcp.json` generado
-- `{CLAUDE_MD}`: ruta al `CLAUDE.md` del run
-
-Además, el runner exporta siempre:
-
+Always injected:
 - `BIK_PM_MCP_TOKEN`
 - `BIK_PM_MCP_URL`
 
-Ejemplo (runtime no hardcoded):
+If `runtimeCommand` is missing, defaults are used:
+- `cursor` -> `${CURSOR_BIN:-cursor-agent}`
+- `opencode` -> `opencode`
+- `kiro` -> `kiro`
+- `openclaw` -> `openclaw`
+- `chat` -> `chat-runtime`
+
+If `runtimeArgs` is missing, default is `[{PROMPT}]`.
+
+Example (`openclaw`):
 
 ```json
 {
-  "id": "open-agent",
-  "name": "OpenAgent",
-  "runtimeType": "opencode",
-  "runtimeCommand": "opencode",
-  "runtimeArgs": ["run", "--cwd", "{WORKDIR}", "--mcp-config", "{MCP_CONFIG}", "{PROMPT}"],
-  "runtimePromptMode": "arg",
+  "id": "openclaw-agent",
+  "name": "OpenClawAgent",
+  "runtimeType": "openclaw",
+  "runtimeCommand": "openclaw",
+  "runtimeArgs": ["run", "--cwd", "{WORKDIR}", "--mcp-config", "{MCP_CONFIG}"],
+  "runtimePromptMode": "stdin",
   "runtimeEnv": {
-    "APP_MODE": "agent"
+    "OPENCLAW_MODE": "agent"
   },
-  "mcpToken": "${OPEN_AGENT_MCP_TOKEN}",
-  "role": "Generalista",
-  "systemPrompt": "Eres OpenAgent...",
-  "permissions": ["read_data"],
-  "maxTokensBudget": 50000
+  "mcpToken": "${OPENCLAW_AGENT_MCP_TOKEN}",
+  "role": "Generalist",
+  "systemPrompt": "You are OpenClawAgent...",
+  "permissions": ["read_data", "update_entity"],
+  "maxTokensBudget": 80000
 }
 ```
 
-Nota: si el CLI concreto necesita stdin, usar:
-
-```json
-"runtimePromptMode": "stdin"
-```
-
-### Variables opcionales por runtime
+Optional runtime env:
 
 ```bash
 export CLAUDE_BIN="claude"
 export CODEX_BIN="codex"
-export CODEX_SANDBOX_MODE="workspace-write"   # read-only|workspace-write|danger-full-access
+export CURSOR_BIN="cursor-agent"
+export CODEX_SANDBOX_MODE="workspace-write"  # read-only|workspace-write|danger-full-access
 export CODEX_MCP_SERVER_NAME="bik_pm"
-export CODEX_MODEL=""                          # opcional
+export CODEX_MODEL=""
+
+# global fallback for generic adapter
+export AGENT_RUNTIME_COMMAND=""
+export AGENT_RUNTIME_ARGS=""
+export AGENT_RUNTIME_ARGS_JSON='[]'           # preferred over AGENT_RUNTIME_ARGS
+export AGENT_RUNTIME_PROMPT_MODE="arg"       # arg|stdin
 ```
 
-`codex` recibe la URL MCP y el bearer env var via `-c mcp_servers.*` en cada ejecución.
-El token del agente se pasa como `BIK_PM_MCP_TOKEN`.
+### Compatibility smoke matrix
 
-## Terminal-first mode (BYO, sin API Anthropic)
-
-Cuando quieres que el usuario vea ejecución en su terminal:
-
-1. Arranca runner en modo terminal:
+Run local runtime probes:
 
 ```bash
-RUNNER_EXECUTION_MODE=terminal \
-RUNNER_SECRET=... \
-RUNNER_ADMIN_TOKEN=... \
-bun run scripts/agent-runner/runner.ts
+bun run smoke-matrix.ts
 ```
 
-2. Arranca una sesión por agente (en cada terminal):
+Strict mode (CI):
 
 ```bash
-AGENT_RUNNER_URL=http://localhost:3939 \
-RUNNER_SECRET=... \
-AGENT_ID=writer-agent \
-AGENT_MCP_TOKEN=... \
-bun run scripts/agent-runner/session-client.ts
+SMOKE_STRICT=1 bun run smoke-matrix.ts
 ```
 
-Comportamiento:
+Filter runtimes:
 
-- Si hay sesión viva -> `queued` -> `leased` -> `running` en esa terminal.
-- Si no hay sesión viva al asignar -> `waiting_session` (estado visual recomendado: amarillo).
+```bash
+SMOKE_RUNTIME_TYPES="claude_code,codex,cursor,openclaw" bun run smoke-matrix.ts
+```
 
-## Produccion
+---
 
-Para produccion (sin maquina local):
-1. Runner como servicio en ECS/Lambda
-2. Claude API (Bedrock) en vez de Claude Code CLI
-3. Tokens MCP almacenados en Secrets Manager
-4. SQS entre PM y Runner para garantia de entrega
-5. CloudWatch para logs de ejecucion de agentes
+## HTTP API (runner)
 
-## Semántica de cola (Fase 1)
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/webhook` | Enqueue signed assignment event |
+| GET | `/jobs` | List durable jobs (admin) |
+| GET | `/jobs/{id}/events` | Job timeline (admin) |
+| POST | `/jobs/{id}/cancel` | Cancel queued/leased/running job (admin) |
+| POST | `/jobs/{id}/retry` | Retry failed/timed_out/dead_letter/cancelled job (admin) |
+| GET | `/stats` | Queue/run aggregates (admin) |
+| GET | `/runs` | Active runs (admin) |
+| GET | `/agents` | Registered agents without tokens (admin) |
+| GET | `/sessions` | Active terminal sessions (admin) |
+| GET | `/health` | Health check |
+| POST | `/agent/session/heartbeat` | Terminal session heartbeat |
+| POST | `/agent/session/claim` | Claim next job for session agent |
+| POST | `/agent/session/jobs/{id}/start` | Mark job running from terminal |
+| POST | `/agent/session/jobs/{id}/complete` | Mark terminal completion |
+| POST | `/agent/session/jobs/{id}/control` | Send control signal (e.g., cooperative cancel) |
 
-- `webhook` encola `agent_job` con `event_id` único (idempotencia)
-- Worker hace claim con `lease` y ejecuta
-- Si falla/timeout: requeue con backoff (30s, 2m, 10m, 30m)
-- Si excede reintentos: `dead_letter`
-- En reinicio del runner: jobs `leased/running` se recuperan a `queued`
+`/jobs` filters:
+- `status`: `queued|waiting_session|leased|running|completed|failed|timed_out|cancelled|dead_letter`
+- `agentId`
+- `limit` (1-500, default 100)
+
+---
+
+## Security notes
+
+- Keep `RUNNER_SECRET` and agent MCP tokens in a secret manager.
+- Use `RUNNER_ADMIN_TOKEN` different from `RUNNER_SECRET` in production.
+- Keep `RUNNER_SKIP_PERMISSIONS=false` in production.
+- Restrict network exposure of runner/admin endpoints.
+
+---
+
+## Operational model (recommended for production)
+
+1. PM backend as single source of truth for jobs/runs/retries/audit.
+2. Local CLI (`listen`) for BYO runtime execution in user terminals.
+3. Use runner queue mainly for controlled infra or debug-heavy environments.
+
+---
+
+## Repo files
+
+- `bik-agent.ts` — unified CLI (`init|doctor|status|listen`)
+- `runner.ts` — webhook server + durable queue + runtime orchestration
+- `listen.ts` — MCP-first terminal listener
+- `session-client.ts` — queue-backed terminal worker
+- `dispatch.ts` — signed assignment dispatcher
+- `jobs.ts` — queue admin CLI
+- `mcp-runtime.ts` — runtime/MCP shared helpers
+- `validate.ts` — static config validator
+- `runtime-presets.ts` — canonical runtime presets (commands/args/env checks)
+- `smoke-matrix.ts` — compatibility smoke tests (binary/version/probe)
+- `COMPATIBILITY_MATRIX.md` — published support matrix by runtime
+- `RUNTIME_PROFILES.md` — runtime config templates
+- `QUALITY_GATES.md` — release checklist
+
+---
+
+## Español (resumen rápido)
+
+- **Objetivo:** asignas una tarea en PM y un agente la ejecuta en terminal con su token MCP.
+- **Modo recomendado:** `listen` (terminal viva + ejecución visible).
+- **Modo robusto con cola:** `runner` + `terminal sessions` (`session-client`).
+- **Runtimes soportados:** `claude_code`, `codex`, `cursor`, y adaptador genérico para `opencode`, `kiro`, `openclaw`, `chat`.
+- **Seguridad:** webhook firmado, tokens por agente, endpoints admin protegidos.
+
+Si necesitas el setup completo en castellano paso a paso, usa esta misma guía y los comandos tal cual.

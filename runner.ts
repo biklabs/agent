@@ -48,6 +48,7 @@ const RUN_TIMEOUT_MS = parseInt(process.env.RUN_TIMEOUT_MS ?? "1800000", 10); //
 const RUNNER_SKIP_PERMISSIONS = process.env.RUNNER_SKIP_PERMISSIONS === "true";
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
+const CURSOR_BIN = process.env.CURSOR_BIN ?? "cursor-agent";
 const CODEX_SANDBOX_MODE = process.env.CODEX_SANDBOX_MODE ?? "workspace-write";
 const CODEX_MCP_SERVER_NAME = process.env.CODEX_MCP_SERVER_NAME ?? "bik_pm";
 const CODEX_MODEL = process.env.CODEX_MODEL ?? "";
@@ -77,7 +78,7 @@ type JobStatus =
   | "cancelled"
   | "dead_letter";
 
-type RuntimeType = "claude_code" | "codex" | "opencode" | "kiro" | "chat";
+type RuntimeType = "claude_code" | "codex" | "cursor" | "opencode" | "kiro" | "openclaw" | "chat";
 type PromptMode = "arg" | "stdin";
 
 interface AgentConfig {
@@ -1053,39 +1054,45 @@ function buildRuntimeCommand(
     };
   }
 
-  if (
-    (runtimeType === "opencode" || runtimeType === "kiro" || runtimeType === "chat") &&
-    agent.runtimeCommand
-  ) {
-    const vars = {
-      PROMPT: prompt,
-      WORKDIR: workdir,
-      MCP_URL: MCP_SERVER_URL,
-      MCP_CONFIG: join(workdir, "mcp.json"),
-      CLAUDE_MD: join(workdir, "CLAUDE.md"),
-    };
+  const defaultGenericCommandByRuntime: Partial<Record<RuntimeType, string>> = {
+    cursor: CURSOR_BIN,
+    opencode: "opencode",
+    kiro: "kiro",
+    openclaw: "openclaw",
+    chat: "chat-runtime",
+  };
 
-    const args = (agent.runtimeArgs ?? []).map((a) => fillTemplate(a, vars));
-    const env = Object.fromEntries(
-      Object.entries(agent.runtimeEnv ?? {}).map(([k, v]) => [k, fillTemplate(v, vars)]),
+  const command = agent.runtimeCommand ?? defaultGenericCommandByRuntime[runtimeType];
+  if (!command) {
+    throw new PermanentJobError(
+      `runtime not implemented: ${runtimeType}. Configure runtimeCommand/runtimeArgs for generic CLI adapter.`,
     );
-
-    const mode: PromptMode = agent.runtimePromptMode ?? "arg";
-    if (mode === "arg" && !args.some((a) => a.includes(prompt))) {
-      args.push(prompt);
-    }
-
-    return {
-      command: agent.runtimeCommand,
-      args,
-      env,
-      promptMode: mode,
-    };
   }
 
-  throw new PermanentJobError(
-    `runtime not implemented: ${runtimeType}. Configure runtimeCommand/runtimeArgs for generic CLI adapter.`,
+  const vars = {
+    PROMPT: prompt,
+    WORKDIR: workdir,
+    MCP_URL: MCP_SERVER_URL,
+    MCP_CONFIG: join(workdir, "mcp.json"),
+    CLAUDE_MD: join(workdir, "CLAUDE.md"),
+  };
+
+  const args = (agent.runtimeArgs ?? ["{PROMPT}"]).map((a) => fillTemplate(a, vars));
+  const env = Object.fromEntries(
+    Object.entries(agent.runtimeEnv ?? {}).map(([k, v]) => [k, fillTemplate(v, vars)]),
   );
+
+  const mode: PromptMode = agent.runtimePromptMode ?? "arg";
+  if (mode === "arg" && !args.some((a) => a.includes(prompt))) {
+    args.push(prompt);
+  }
+
+  return {
+    command,
+    args,
+    env,
+    promptMode: mode,
+  };
 }
 
 function spawnAgent(agent: AgentConfig, payload: WebhookPayload, jobId: string): RunRecord {
@@ -1556,6 +1563,10 @@ const server = Bun.serve({
           role: agent.role,
           systemPrompt: agent.systemPrompt,
           runtimeType: getRuntimeType(agent),
+          runtimeCommand: agent.runtimeCommand ?? null,
+          runtimeArgs: agent.runtimeArgs ?? null,
+          runtimeEnv: agent.runtimeEnv ?? null,
+          runtimePromptMode: agent.runtimePromptMode ?? null,
           permissions: agent.permissions,
           maxTokensBudget: agent.maxTokensBudget,
         },
@@ -1638,6 +1649,17 @@ const server = Bun.serve({
       if (job.agent_id !== body.agentId) {
         return safeJsonResponse({ error: "agent mismatch" }, { status: 403 });
       }
+      if (job.status === "cancelled") {
+        logJobEvent(jobId, "runtime.completed_terminal_after_cancel", {
+          sessionId: body.sessionId,
+          agentId: body.agentId,
+          exitCode: body.exitCode ?? null,
+          timedOut: !!body.timedOut,
+          summary: body.summary ?? null,
+          error: body.error ?? null,
+        });
+        return safeJsonResponse({ ok: true, jobId, alreadyCancelled: true });
+      }
       if (!["running", "leased"].includes(job.status)) {
         return safeJsonResponse({ error: `job not active (status=${job.status})` }, { status: 409 });
       }
@@ -1659,6 +1681,39 @@ const server = Bun.serve({
         error: body.error ?? null,
       });
       return safeJsonResponse({ ok: true, jobId });
+    }
+
+    const sessionControlMatch = url.pathname.match(/^\/agent\/session\/jobs\/([a-f0-9-]+)\/control$/i);
+    if (sessionControlMatch && req.method === "POST") {
+      if (!isSessionAuthorized(req)) {
+        return safeJsonResponse({ error: "unauthorized" }, { status: 401 });
+      }
+
+      type SessionControlPayload = { sessionId: string; agentId: string };
+      let body: SessionControlPayload;
+      try {
+        body = (await req.json()) as SessionControlPayload;
+      } catch {
+        return safeJsonResponse({ error: "invalid json" }, { status: 400 });
+      }
+
+      try {
+        sanitizeId(body.sessionId, "sessionId");
+        sanitizeId(body.agentId, "agentId");
+      } catch (err) {
+        return safeJsonResponse({ error: String(err) }, { status: 400 });
+      }
+
+      const jobId = sessionControlMatch[1] ?? "";
+      const job = getJobById(jobId);
+      if (!job) return safeJsonResponse({ error: "job not found" }, { status: 404 });
+      if (job.agent_id !== body.agentId) {
+        return safeJsonResponse({ error: "agent mismatch" }, { status: 403 });
+      }
+
+      const status = job.status;
+      const shouldCancel = status === "cancelled";
+      return safeJsonResponse({ ok: true, shouldCancel, status });
     }
 
     if (url.pathname === "/webhook" && req.method === "POST") {
@@ -1762,6 +1817,7 @@ Endpoints:
   POST /agent/session/claim     — Claim next job for session agent
   POST /agent/session/jobs/:id/start    — Mark running
   POST /agent/session/jobs/:id/complete — Mark complete/fail
+  POST /agent/session/jobs/:id/control  — Query cancel control for claimed/running job
 
 Server listening on :${server.port}
 ${RUNNER_EXECUTION_MODE === "spawn" ? "Worker running (spawn mode)..." : "Terminal mode active (session-driven)..."}

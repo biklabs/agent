@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-type RuntimeType = "claude_code" | "codex" | "opencode" | "kiro" | "chat";
+type RuntimeType = "claude_code" | "codex" | "cursor" | "opencode" | "kiro" | "openclaw" | "chat";
+type PromptMode = "arg" | "stdin";
 
 const RUNNER_URL = process.env.AGENT_RUNNER_URL ?? "http://localhost:3939";
 const RUNNER_SECRET = process.env.RUNNER_SECRET ?? "";
@@ -29,6 +30,7 @@ const HEARTBEAT_INTERVAL_MS = parseInt(process.env.AGENT_HEARTBEAT_INTERVAL_MS ?
 const HTTP_TIMEOUT_MS = parseInt(process.env.AGENT_HTTP_TIMEOUT_MS ?? "15000", 10);
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 const CODEX_BIN = process.env.CODEX_BIN ?? "codex";
+const CURSOR_BIN = process.env.CURSOR_BIN ?? "cursor-agent";
 
 if (!RUNNER_SECRET) throw new Error("RUNNER_SECRET is required");
 if (!AGENT_ID) throw new Error("AGENT_ID is required");
@@ -59,6 +61,10 @@ interface AgentInfo {
   name: string;
   role: string;
   runtimeType: RuntimeType;
+  runtimeCommand?: string | null;
+  runtimeArgs?: string[] | null;
+  runtimeEnv?: Record<string, string> | null;
+  runtimePromptMode?: PromptMode | null;
   systemPrompt: string;
   permissions: string[];
   maxTokensBudget: number;
@@ -129,60 +135,126 @@ function buildPrompt(agent: AgentInfo, job: ClaimedJob): string {
     .join("\n");
 }
 
-function spawnRuntime(runtimeType: RuntimeType, workdir: string, prompt: string) {
-  if (runtimeType === "claude_code") {
-    return spawn(CLAUDE_BIN, ["--mcp-config", join(workdir, "mcp.json"), "-p", prompt, "--max-turns", "20"], {
-      cwd: workdir,
-      env: { ...process.env, BIK_PM_MCP_TOKEN: AGENT_MCP_TOKEN, CLAUDE_MD: join(workdir, "CLAUDE.md") },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+function fillTemplate(value: string, vars: Record<string, string>): string {
+  let out = value;
+  for (const [k, v] of Object.entries(vars)) {
+    out = out.replaceAll(`{${k}}`, v);
+  }
+  return out;
+}
+
+function buildRuntimeCommand(agent: AgentInfo, workdir: string, prompt: string): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  promptMode: PromptMode;
+} {
+  if (agent.runtimeType === "claude_code") {
+    return {
+      command: CLAUDE_BIN,
+      args: ["--mcp-config", join(workdir, "mcp.json"), "-p", prompt, "--max-turns", "20"],
+      env: {},
+      promptMode: "arg",
+    };
   }
 
-  if (runtimeType === "codex") {
-    return spawn(
-      CODEX_BIN,
-      [
-        "exec",
-        "--cd",
-        workdir,
-        "--skip-git-repo-check",
-        "--sandbox",
-        process.env.CODEX_SANDBOX_MODE ?? "workspace-write",
-        "-c",
-        `mcp_servers.bik_pm.url=\"${MCP_SERVER_URL}\"`,
-        "-c",
-        "mcp_servers.bik_pm.bearer_token_env_var=\"BIK_PM_MCP_TOKEN\"",
-        prompt,
-      ],
-      {
-        cwd: workdir,
-        env: { ...process.env, BIK_PM_MCP_TOKEN: AGENT_MCP_TOKEN },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+  if (agent.runtimeType === "codex") {
+    const serverName = process.env.CODEX_MCP_SERVER_NAME ?? "bik_pm";
+    const args = [
+      "exec",
+      "--cd",
+      workdir,
+      "--skip-git-repo-check",
+      "--sandbox",
+      process.env.CODEX_SANDBOX_MODE ?? "workspace-write",
+      "-c",
+      `mcp_servers.${serverName}.url="${MCP_SERVER_URL}"`,
+      "-c",
+      `mcp_servers.${serverName}.bearer_token_env_var="BIK_PM_MCP_TOKEN"`,
+    ];
+    const model = process.env.CODEX_MODEL ?? "";
+    if (model) args.push("-m", model);
+    args.push(prompt);
+
+    return {
+      command: CODEX_BIN,
+      args,
+      env: {},
+      promptMode: "arg",
+    };
   }
 
-  const genericCmd = process.env.AGENT_RUNTIME_COMMAND;
-  if (!genericCmd) {
-    throw new Error(`runtime ${runtimeType} not configured. Set AGENT_RUNTIME_COMMAND for generic runtime.`);
+  const defaultGenericCommandByRuntime: Partial<Record<RuntimeType, string>> = {
+    cursor: CURSOR_BIN,
+    opencode: "opencode",
+    kiro: "kiro",
+    openclaw: "openclaw",
+    chat: "chat-runtime",
+  };
+
+  const command = agent.runtimeCommand ?? process.env.AGENT_RUNTIME_COMMAND ?? defaultGenericCommandByRuntime[agent.runtimeType];
+  if (!command) {
+    throw new Error(`runtime ${agent.runtimeType} not configured. Set runtimeCommand or AGENT_RUNTIME_COMMAND.`);
   }
 
-  const genericArgs = (process.env.AGENT_RUNTIME_ARGS ?? "{PROMPT}")
-    .split(" ")
-    .filter(Boolean)
-    .map((x) =>
-      x
-        .replaceAll("{PROMPT}", prompt)
-        .replaceAll("{WORKDIR}", workdir)
-        .replaceAll("{MCP_URL}", MCP_SERVER_URL)
-        .replaceAll("{MCP_CONFIG}", join(workdir, "mcp.json")),
-    );
+  const vars = {
+    PROMPT: prompt,
+    WORKDIR: workdir,
+    MCP_URL: MCP_SERVER_URL,
+    MCP_CONFIG: join(workdir, "mcp.json"),
+    CLAUDE_MD: join(workdir, "CLAUDE.md"),
+  };
 
-  return spawn(genericCmd, genericArgs, {
+  const envArgTemplates = process.env.AGENT_RUNTIME_ARGS_JSON;
+  let fallbackArgs: string[] | null = null;
+  if (envArgTemplates) {
+    try {
+      const parsed = JSON.parse(envArgTemplates);
+      if (Array.isArray(parsed) && parsed.every((v) => typeof v === "string")) {
+        fallbackArgs = parsed;
+      }
+    } catch {
+      // Ignore malformed env fallback and continue to AGENT_RUNTIME_ARGS/plain default.
+    }
+  }
+  if (!fallbackArgs) {
+    fallbackArgs = (process.env.AGENT_RUNTIME_ARGS ?? "{PROMPT}").split(" ").filter(Boolean);
+  }
+
+  const argTemplates = agent.runtimeArgs ?? fallbackArgs;
+  const args = argTemplates.map((value) => fillTemplate(value, vars));
+  const runtimeEnv = Object.fromEntries(
+    Object.entries(agent.runtimeEnv ?? {}).map(([k, v]) => [k, fillTemplate(v, vars)]),
+  );
+
+  const promptMode = agent.runtimePromptMode ?? (process.env.AGENT_RUNTIME_PROMPT_MODE === "stdin" ? "stdin" : "arg");
+  if (promptMode === "arg" && !args.some((a) => a.includes(prompt))) {
+    args.push(prompt);
+  }
+
+  return {
+    command,
+    args,
+    env: runtimeEnv,
+    promptMode,
+  };
+}
+
+function spawnRuntime(agent: AgentInfo, workdir: string, prompt: string): { child: ReturnType<typeof spawn>; promptMode: PromptMode } {
+  const runtime = buildRuntimeCommand(agent, workdir, prompt);
+  const child = spawn(runtime.command, runtime.args, {
     cwd: workdir,
-    env: { ...process.env, BIK_PM_MCP_TOKEN: AGENT_MCP_TOKEN, BIK_PM_MCP_URL: MCP_SERVER_URL },
+    env: {
+      ...process.env,
+      ...runtime.env,
+      BIK_PM_MCP_TOKEN: AGENT_MCP_TOKEN,
+      BIK_PM_MCP_URL: MCP_SERVER_URL,
+      CLAUDE_MD: join(workdir, "CLAUDE.md"),
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
+
+  return { child, promptMode: runtime.promptMode };
 }
 
 async function executeClaimedJob(job: ClaimedJob, agent: AgentInfo): Promise<void> {
@@ -194,10 +266,14 @@ async function executeClaimedJob(job: ClaimedJob, agent: AgentInfo): Promise<voi
   let errMessage: string | null = null;
 
   try {
-    const child = spawnRuntime(agent.runtimeType, workdir, prompt);
+    const { child, promptMode } = spawnRuntime(agent, workdir, prompt);
 
     child.stdout?.on("data", (chunk: Buffer) => process.stdout.write(chunk));
     child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+    if (promptMode === "stdin" && child.stdin) {
+      child.stdin.write(prompt);
+      child.stdin.end();
+    }
 
     await runnerPost(`/agent/session/jobs/${job.id}/start`, {
       sessionId: SESSION_ID,

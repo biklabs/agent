@@ -2,7 +2,7 @@
   "name": "@biklabs/agent-runner",
   "version": "0.1.0",
   "private": false,
-  "description": "BIKLabs terminal-first multi-runtime agent orchestrator (Claude Code, Codex, OpenCode, Kiro)",
+  "description": "BIKLabs terminal-first multi-runtime agent orchestrator (Claude Code, Codex, Cursor, OpenCode, Kiro, OpenClaw)",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -17,19 +17,33 @@
     "bun": ">=1.2.0"
   },
   "bin": {
+    "bik-agent": "./bik-agent.ts",
     "biklabs-agent-runner": "./runner.ts",
     "biklabs-agent-dispatch": "./dispatch.ts",
     "biklabs-agent-jobs": "./jobs.ts",
-    "biklabs-agent-session": "./session-client.ts"
+    "biklabs-agent-session": "./session-client.ts",
+    "biklabs-agent-listen": "./listen.ts",
+    "biklabs-agent-status": "./status.ts",
+    "biklabs-agent-doctor": "./doctor.ts",
+    "biklabs-agent-init": "./init.ts"
   },
   "files": [
+    "bik-agent.ts",
     "runner.ts",
     "dispatch.ts",
     "jobs.ts",
     "session-client.ts",
+    "listen.ts",
+    "status.ts",
+    "doctor.ts",
+    "init.ts",
+    "mcp-runtime.ts",
+    "runtime-presets.ts",
+    "smoke-matrix.ts",
     "validate.ts",
     "agents.json",
     "README.md",
+    "COMPATIBILITY_MATRIX.md",
     "QUALITY_GATES.md",
     "RUNTIME_PROFILES.md",
     "SECURITY.md",
@@ -37,11 +51,18 @@
     "LICENSE"
   ],
   "scripts": {
+    "agent": "bun run ./bik-agent.ts",
     "runner": "bun run ./runner.ts",
     "dispatch": "bun run ./dispatch.ts",
     "jobs": "bun run ./jobs.ts",
     "session": "bun run ./session-client.ts",
-    "check": "bun run ./validate.ts"
+    "listen": "bun run ./listen.ts",
+    "status": "bun run ./status.ts",
+    "doctor": "bun run ./doctor.ts",
+    "init": "bun run ./init.ts",
+    "check": "bun run ./validate.ts",
+    "presets": "bun run ./runtime-presets.ts",
+    "smoke:matrix": "bun run ./smoke-matrix.ts"
   },
   "keywords": [
     "biklabs",
@@ -50,8 +71,10 @@
     "mcp",
     "claude-code",
     "codex",
+    "cursor",
     "opencode",
     "kiro",
+    "openclaw",
     "terminal-first"
   ]
 }
