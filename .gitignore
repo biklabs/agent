@@ -1,5 +1,6 @@
-*.db
-*.sqlite
+node_modules/
+dist/
 *.log
-/tmp/
-.DS_Store
+.env
+.env.local
+.biklabs-agent/
