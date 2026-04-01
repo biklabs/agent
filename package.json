@@ -1,57 +1,40 @@
 {
-  "name": "@biklabs/agent-runner",
-  "version": "0.1.0",
+  "name": "@biklabs/agent",
+  "version": "0.2.0",
   "private": false,
-  "description": "BIKLabs terminal-first multi-runtime agent orchestrator (Claude Code, Codex, OpenCode, Kiro)",
+  "description": "Connect your AI coding agent to BikLabs PM. Terminal-first, MCP-native.",
   "license": "MIT",
   "type": "module",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/biklabs/agent-runner.git"
-  },
-  "homepage": "https://github.com/biklabs/agent-runner",
-  "bugs": {
-    "url": "https://github.com/biklabs/agent-runner/issues"
-  },
   "engines": {
     "bun": ">=1.2.0"
   },
   "bin": {
-    "biklabs-agent-runner": "./runner.ts",
-    "biklabs-agent-dispatch": "./dispatch.ts",
-    "biklabs-agent-jobs": "./jobs.ts",
-    "biklabs-agent-session": "./session-client.ts"
+    "biklabs-agent": "./biklabs-agent.ts"
   },
   "files": [
-    "runner.ts",
-    "dispatch.ts",
-    "jobs.ts",
-    "session-client.ts",
-    "validate.ts",
-    "agents.json",
+    "biklabs-agent.ts",
+    "init.ts",
+    "listen.ts",
+    "doctor.ts",
+    "status.ts",
+    "mcp-runtime.ts",
+    "control-plane.ts",
+    "runtime-presets.ts",
     "README.md",
-    "QUALITY_GATES.md",
-    "RUNTIME_PROFILES.md",
-    "SECURITY.md",
-    "CONTRIBUTING.md",
     "LICENSE"
   ],
-  "scripts": {
-    "runner": "bun run ./runner.ts",
-    "dispatch": "bun run ./dispatch.ts",
-    "jobs": "bun run ./jobs.ts",
-    "session": "bun run ./session-client.ts",
-    "check": "bun run ./validate.ts"
-  },
   "keywords": [
     "biklabs",
     "agent",
-    "orchestrator",
     "mcp",
     "claude-code",
     "codex",
-    "opencode",
-    "kiro",
+    "cursor",
+    "pm",
     "terminal-first"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/biklabs/agent.git"
+  }
 }
